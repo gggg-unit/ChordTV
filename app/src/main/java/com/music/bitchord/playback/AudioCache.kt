@@ -977,7 +977,13 @@ object AudioCache {
                 // Safe to fill for the same reason in both cases: either nothing
                 // outranks YouTube and read-ahead is the only writer, or a
                 // source has been pinned and every writer now resolves to it.
-                val cacheBytes = (!substitutable || warmed != null) && !pinnedToYouTube
+                val cacheBytes = shouldPrefetchAudioBytes(
+                    substitutable = substitutable,
+                    warmed = warmed != null,
+                    pinnedToYouTube = pinnedToYouTube,
+                    lossless = warmed?.format?.isLossless == true,
+                    tv = com.music.bitchord.data.TvWorkPolicy.enabled,
+                )
                 if (cacheBytes) {
                     launch(TrackLog.about(next)) {
                         delay(PREFETCH_DELAY_MS)

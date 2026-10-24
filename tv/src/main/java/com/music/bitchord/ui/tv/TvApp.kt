@@ -311,6 +311,13 @@ private fun TvMainShell(
 
     val signedIn by viewModel.signedIn.collectAsState()
     val activeProfileId by viewModel.activeProfileId.collectAsState()
+    LaunchedEffect(destination, signedIn, activeProfileId) {
+        viewModel.onTvLibraryVisibilityChanged(destination == TvDestination.LIBRARY)
+        when (destination) {
+            TvDestination.EXPLORE -> viewModel.ensureTvExploreLoaded()
+            else -> Unit
+        }
+    }
     LaunchedEffect(signedIn, activeProfileId) {
         if (!signedIn) {
             if (detailStack.isNotEmpty()) {

@@ -17,6 +17,7 @@ class TvStartup : Initializer<Unit> {
     override fun create(context: Context) {
         TvSettings.init(context)
         TvPerformance.init(context)
+        TvWorkPolicy.enabled = true
         AppUpdateChecker.releaseApiUrl = tvReleaseApiUrl(BuildConfig.BUILD_TYPE)
         TvUsbMusic.install()
         // A looping canvas clip at 24 fps is plenty behind the player and spares the TV GPU.

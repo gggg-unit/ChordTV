@@ -620,7 +620,16 @@ private fun resolvePlaybackUri(uriString: String, localPath: String?): String {
 private fun Song.matchQuery(): String = buildString {
     append("&n=").append(Uri.encode(title))
     append("&a=").append(Uri.encode(artist))
-    TrackMatcher.secondsOf(durationText)?.let { append("&d=").append(it) }
+    val seconds = TrackMatcher.secondsOf(durationText)
+        ?: if (com.music.bitchord.data.TvWorkPolicy.enabled) {
+            com.music.bitchord.data.sources.KnownTrackDurations.get(videoId)
+        } else null
+    seconds?.let {
+        append("&d=").append(it)
+        if (com.music.bitchord.data.TvWorkPolicy.enabled) {
+            com.music.bitchord.data.sources.KnownTrackDurations.put(videoId, it)
+        }
+    }
     albumName?.takeIf { it.isNotBlank() }?.let { append("&l=").append(Uri.encode(it)) }
     isExplicit?.let { append("&e=").append(if (it) "1" else "0") }
     // `m` controls source routing, not player policy. A converted catalogue

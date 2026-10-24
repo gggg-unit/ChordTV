@@ -3,6 +3,7 @@ package com.music.bitchord.data.sources
 import android.net.Uri
 import android.util.Log
 import com.music.bitchord.data.TrackLog
+import com.music.bitchord.data.TvWorkPolicy
 import com.music.bitchord.data.model.Song
 import com.music.bitchord.data.settings.AppSettings
 import com.music.bitchord.data.settings.AudioQuality
@@ -12,6 +13,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Turns a queued track into an openable stream, using whichever source can
@@ -148,7 +150,8 @@ object SourceResolver {
     fun targetIn(uri: Uri) = TrackMatcher.Target(
         title = uri.getQueryParameter("n").orEmpty(),
         artist = uri.getQueryParameter("a").orEmpty(),
-        durationSec = uri.getQueryParameter("d")?.toIntOrNull(),
+        durationSec = uri.getQueryParameter("d")?.toIntOrNull()
+            ?: if (TvWorkPolicy.enabled) uri.getQueryParameter("v")?.let(KnownTrackDurations::get) else null,
         album = uri.getQueryParameter("l"),
         isExplicit = uri.getQueryParameter("e")?.let { it == "1" },
         isVideo = uri.getQueryParameter("m") == "1",
@@ -324,9 +327,14 @@ object SourceResolver {
         if (target.title.isBlank() || target.isVideo) return null
         val active = SourceRegistry.activeForPlayback()
         val youtube = active.firstOrNull { it.kind == SourceKind.YOUTUBE } ?: return null
-        val quick = rankedAbove(youtube.configId, active).filter { it.kind.worthPrefetching }
+        val quick = rankedAbove(youtube.configId, active).filter {
+            it.kind.worthPrefetching || (TvWorkPolicy.enabled && it.kind == SourceKind.ADDON && target.durationSec != null)
+        }.let { if (TvWorkPolicy.enabled) it.take(2) else it }
         if (quick.isEmpty()) return null
-        val (source, stream) = bestAcross(quick, target, requestForNow()) ?: return null
+        val result = if (TvWorkPolicy.enabled) {
+            withTimeoutOrNull(1_500L) { bestAcross(quick, target, requestForNow(), strictLength = true) }
+        } else bestAcross(quick, target, requestForNow())
+        val (source, stream) = result ?: return null
         TrackLog.d(
             TAG,
             "warmed: '${target.title}' from ${source.displayName} at ${stream.format.summary}",

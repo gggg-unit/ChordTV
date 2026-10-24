@@ -236,8 +236,15 @@ private fun ShelfItem.itemKey(): String = videoId ?: browseId ?: title
 private fun HomeShelf.isArtistShelf(): Boolean =
     items.isNotEmpty() && items.count { it.browseId?.startsWith("UC") == true } * 2 > items.size
 
-internal fun ShelfItem.toSong(): Song? = videoId?.let {
-    Song(videoId = it, title = title, artist = subtitle, thumbnailUrl = thumbnailUrl)
+internal fun ShelfItem.toSong(): Song? = videoId?.let { id ->
+    val duration = subtitle.split('•').map(String::trim)
+        .firstOrNull { it.matches(Regex("""(?:\d+:)?\d{1,2}:\d{2}""")) }
+    duration?.let(com.music.bitchord.data.sources.TrackMatcher::secondsOf)?.let {
+        com.music.bitchord.data.sources.KnownTrackDurations.put(id, it)
+    }
+    Song(videoId = id, title = title,
+        artist = com.music.bitchord.data.innertube.InnertubeParser.artistFromSubtitle(subtitle),
+        thumbnailUrl = thumbnailUrl, durationText = duration)
 }
 
 internal fun browseTypeOf(browseId: String): BrowseType = when {

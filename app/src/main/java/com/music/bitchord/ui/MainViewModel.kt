@@ -12,6 +12,8 @@ import com.music.bitchord.auth.profileId
 import com.music.bitchord.auth.sessionId
 import com.music.bitchord.auth.adjacentProfile
 import com.music.bitchord.data.AppUpdateChecker
+import com.music.bitchord.data.HomeFeedCache
+import com.music.bitchord.data.TvWorkPolicy
 import com.music.bitchord.data.LocalMediaRepository
 import com.music.bitchord.data.LikeState
 import com.music.bitchord.data.YtMusicRepository
@@ -142,6 +144,49 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _homeRecentlyPlayedLoading = MutableStateFlow(false)
     val homeRecentlyPlayedLoading: StateFlow<Boolean> = _homeRecentlyPlayedLoading.asStateFlow()
     private val homeLoadGeneration = AtomicLong(0L)
+    private val homeDiskCache = HomeFeedCache(java.io.File(app.cacheDir, "tv-home-v1"))
+    private var homeCacheWrite: Job? = null
+    private var homeFreshReceived = false
+    private var tvExploreRequested = false
+    private var tvLibraryRequested = false
+    private var tvLibraryVisible = false
+
+    private fun homeCacheIdentity(): String? {
+        val listener = if (_signedIn.value) listenerKey() ?: return null else "guest"
+        return "$listener:${Locale.getDefault().toLanguageTag()}"
+    }
+
+    private fun persistHome() {
+        if (!TvWorkPolicy.enabled) return
+        val identity = homeCacheIdentity() ?: return
+        val generation = homeLoadGeneration.get()
+        val shelves = (_home.value as? UiState.Success)?.data ?: return
+        homeCacheWrite?.cancel()
+        homeCacheWrite = viewModelScope.launch {
+            delay(500)
+            if (identity == homeCacheIdentity() && generation == homeLoadGeneration.get()) {
+                homeDiskCache.write(identity, shelves)
+            }
+        }
+    }
+
+    fun ensureTvExploreLoaded() {
+        if (tvExploreRequested) return
+        tvExploreRequested = true
+        loadExplore()
+    }
+
+    fun ensureTvLibraryLoaded() {
+        if (!_signedIn.value || tvLibraryRequested) return
+        tvLibraryRequested = true
+        loadLibrary()
+        loadPlaylists()
+    }
+
+    fun onTvLibraryVisibilityChanged(visible: Boolean) {
+        tvLibraryVisible = visible
+        if (visible) ensureTvLibraryLoaded()
+    }
 
     private val _explore = MutableStateFlow<UiState<List<MoodGenreSection>>>(UiState.Loading)
     val explore: StateFlow<UiState<List<MoodGenreSection>>> = _explore.asStateFlow()
@@ -1419,11 +1464,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         startSuggestPipeline()
         startTypeaheadMediaPipeline()
         loadHome()
-        loadExplore()
+        if (!TvWorkPolicy.enabled) loadExplore()
         if (_signedIn.value) {
-            loadLibrary()
             loadAccount()
-            loadPlaylists()
+            if (!TvWorkPolicy.enabled) {
+                loadLibrary()
+                loadPlaylists()
+            }
         }
         viewModelScope.launch {
             // drop(1): the current value is just the count so far, not a play.
@@ -1632,7 +1679,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun loadHome() {
         val identity = listenerKey()
         val generation = homeLoadGeneration.incrementAndGet()
+        homeCacheWrite?.cancel()
+        homeFreshReceived = false
         _home.value = UiState.Loading
+        if (TvWorkPolicy.enabled) homeCacheIdentity()?.let { cacheIdentity ->
+            viewModelScope.launch {
+                val cached = homeDiskCache.read(cacheIdentity)
+                if (cached != null && isCurrentHomeLoad(identity, generation) && !homeFreshReceived) {
+                    _home.value = UiState.Success(cached)
+                }
+            }
+        }
         homeContinuation = null
         homeSeenTitles.clear()
         _homeLoadingMore.value = false
@@ -1700,6 +1757,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         identity == listenerKey() && generation == homeLoadGeneration.get()
 
     private fun publishHomeShelves(shelves: List<HomeShelf>, prepend: Boolean = false) {
+        if (shelves.isEmpty()) return
+        if (TvWorkPolicy.enabled && !homeFreshReceived) {
+            // A disk snapshot is a placeholder, never an input to network deduplication.
+            _home.value = UiState.Success(emptyList())
+        }
+        homeFreshReceived = true
         val existing = (_home.value as? UiState.Success)?.data.orEmpty()
         if (prepend) {
             // YouTube's core home can also contain a stale "Recently played"
@@ -1709,11 +1772,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             _home.value = UiState.Success(shelves + existing.filterNot {
                 it.title.lowercase(Locale.ROOT) in replacing
             })
+            persistHome()
             return
         }
         val added = shelves.withoutRepeatsOf(existing)
             .filter { homeSeenTitles.add(it.title.lowercase(Locale.ROOT)) }
-        if (added.isNotEmpty()) _home.value = UiState.Success(existing + added)
+        if (added.isNotEmpty()) {
+            _home.value = UiState.Success(existing + added)
+            persistHome()
+        }
     }
 
     /** Refreshes the core feed without blanking the current Play page first. */
@@ -1725,7 +1792,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             homeSeenTitles.clear()
             val shelves = feed.shelves.withoutRepeatsOf(emptyList())
                 .filter { homeSeenTitles.add(it.title.lowercase(Locale.ROOT)) }
-            if (shelves.isNotEmpty()) _home.value = UiState.Success(shelves)
+            if (shelves.isNotEmpty()) {
+                homeFreshReceived = true
+                _home.value = UiState.Success(shelves)
+                persistHome()
+            }
         }
         recent?.await()?.onSuccess { shelf ->
             if (identity == listenerKey()) shelf?.let { publishHomeShelves(listOf(it), prepend = true) }
@@ -3321,6 +3392,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun clearListenerState(restoreCached: Boolean = false) {
+        tvLibraryRequested = false
         _account.value = null
         likedSyncJob?.cancel()
         LikeState.clear()
@@ -3353,9 +3425,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             Innertube.ensureSessionScope()
             loadHome()
-            loadLibrary()
             loadAccount()
-            loadPlaylists()
+            if (!TvWorkPolicy.enabled || tvLibraryVisible) {
+                tvLibraryRequested = TvWorkPolicy.enabled
+                loadLibrary()
+                loadPlaylists()
+            }
         }
     }
 
